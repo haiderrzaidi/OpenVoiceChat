@@ -84,13 +84,15 @@ class Player_ws:
     def play(self, audio_array, samplerate):
         logger.info(f"Player_ws: Play called. Input audio array type: {type(audio_array)}, dtype: {audio_array.dtype}, shape: {audio_array.shape}, samplerate: {samplerate}")
         if audio_array.dtype == np.int16:
-            audio_array = audio_array.astype(np.float32) / (1 << 15) # Convert to float32 and normalize
-        elif audio_array.dtype != np.float32: # Ensure it's float32 for resampling
+            audio_array = audio_array.astype(np.float32) / 32768.0
+        elif audio_array.dtype != np.float32:
             audio_array = audio_array.astype(np.float32)
-
+        # Normalize to [-1, 1]
+        max_val = np.max(np.abs(audio_array))
+        if max_val > 0:
+            audio_array = audio_array / max_val
         resampled_audio = librosa.resample(y=audio_array, orig_sr=samplerate, target_sr=44100)
         logger.info(f"Player_ws: Resampled to 44100 Hz float32. Shape: {resampled_audio.shape}")
-        
         audio_bytes = resampled_audio.tobytes()
         logger.info(f"Player_ws: Putting bytes to output queue. Length: {len(audio_bytes)}")
         self.output_queue.put(audio_bytes)
@@ -110,6 +112,7 @@ class Player_ws:
         # print(time_to_wait)
         # time.sleep(time_to_wait)
         self.playing = False
+        
 
 
 class Listener_ws:

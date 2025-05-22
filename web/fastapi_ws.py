@@ -38,7 +38,7 @@ async def websocket_endpoint(websocket: WebSocket):
     player = Player_ws(output_queue)
 
     api_key = os.getenv("DEEPGRAM_API_KEY")
-    ear = Ear(silence_seconds=1.0, api_key=api_key)
+    ear = Ear(silence_seconds=1.0, api_key=api_key,listener=listener)
     # ear = Ear_hf(
     #     model_id="openai/whisper-tiny.en",
     #     silence_seconds=1.5,
@@ -55,7 +55,8 @@ async def websocket_endpoint(websocket: WebSocket):
         output_format='mp3',
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        region_name=os.getenv("REGION_NAME")
+        region_name=os.getenv("REGION_NAME"),
+        player=player
     )
     # Update the call to run_chat to include enable_interruptions=True
     # Assuming the order in run_chat is: verbose, enable_interruptions

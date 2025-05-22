@@ -77,44 +77,48 @@ function start() {
     visualize();
   }
 
-  socket.onmessage = async (event) => {
-    // Try to decode as text first for control messages
-    if (event.data instanceof ArrayBuffer) {
-        const textDecoder = new TextDecoder();
-        let potentialText = '';
-        try {
-            potentialText = textDecoder.decode(event.data);
-        } catch (e) {
-            // Not valid UTF-8, likely binary audio data
-        }
-
-        if (potentialText === 'stop') {
-            logElement.innerText = 'Interruption';
-            if (currentSourceNode) {
-                currentSourceNode.stop();
-                currentSourceNode = null;
-            }
-            isPlaying = false;
-            audioQueue = [];
-        } else if (potentialText === 'none') {
-            // pass
-        } else {
-            // Assuming it's audio data if not 'stop' or 'none'
-            console.log("Received audio data from server (bytes):", event.data.byteLength);
-            const float32Array = new Float32Array(event.data); // event.data is already ArrayBuffer
-            console.log("Decoded Float32Array length:", float32Array.length);
-            const audioBuffer = audioCtx.createBuffer(1, float32Array.length, 44100);
-            audioBuffer.getChannelData(0).set(float32Array);
-            audioQueue.push(audioBuffer);
-            if (audioQueue.length === 1 && !isPlaying) {
-                playAudioFromQueue();
-            }
-        }
-    } else {
-        console.warn("Received non-ArrayBuffer data:", event.data);
+socket.onmessage = async (event) => {
+  if (event.data instanceof ArrayBuffer) {
+    const textDecoder = new TextDecoder();
+    let potentialText = '';
+    try {
+      potentialText = textDecoder.decode(event.data);
+    } catch (e) {
+      // Not valid UTF-8, likely binary audio data
     }
-  };
-
+    if (potentialText === 'stop') {
+      logElement.innerText = 'Interruption';
+      if (currentSourceNode) {
+        currentSourceNode.stop();
+        currentSourceNode = null;
+      }
+      isPlaying = false;
+      audioQueue = [];
+    } else if (potentialText === 'none') {
+      // pass
+    } else {
+      console.log("Received audio data from server (bytes):", event.data.byteLength);
+      const float32Array = new Float32Array(event.data);
+      console.log("Decoded Float32Array length:", float32Array.length);
+      // Log sample values to check for valid audio
+      console.log("Sample values (first 10):", float32Array.slice(0, 10));
+      // Ensure samples are in [-1, 1] range
+      for (let i = 0; i < float32Array.length; i++) {
+        if (Math.abs(float32Array[i]) > 1) {
+          console.warn("Sample out of range:", float32Array[i]);
+        }
+      }
+      const audioBuffer = audioCtx.createBuffer(1, float32Array.length, 44100);
+      audioBuffer.getChannelData(0).set(float32Array);
+      audioQueue.push(audioBuffer);
+      if (audioQueue.length === 1 && !isPlaying) {
+        playAudioFromQueue();
+      }
+    }
+  } else {
+    console.warn("Received non-ArrayBuffer data:", event.data);
+  }
+};
   function playAudioFromQueue() {
     if (audioQueue.length > 0 && !isPlaying) {
       isPlaying = true;
