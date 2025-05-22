@@ -2,53 +2,514 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Title</title>
+    <title>Audio Visualization</title>
     <style>
         body {
-        background: radial-gradient(farthest-side, #182158 0%, #030414 100%) no-repeat fixed 0 0;
-        margin: 0;
+            background: radial-gradient(farthest-side, #182158 0%, #030414 100%) no-repeat fixed 0 0;
+            margin: 0;
+            overflow: hidden;
         }
         h1 {
-        color: #fff;
-        font: 10vh/1.2 sans-serif;
+            color: #fff;
+            font: 10vh/1.2 sans-serif;
         }
         p {
-        color: #fff;
-        font: monospace;
+            color: #fff;
+            font: monospace;
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            font-size: 12px;
+            max-width: 300px;
+            line-height: 1.3;
         }
         #canvas {
-        position: absolute;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 100%;
-        height: 400px;
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 100%;
+            height: 400px;
         }
-
+        #userSpeechIndicator {
+            position: absolute;
+            bottom: 50px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0.4) 70%, transparent 100%);
+            border: 3px solid rgba(255,255,255,0.6);
+            transition: all 0.3s ease;
+            z-index: 5;
+        }
+        #userSpeechIndicator.speaking {
+            background: radial-gradient(circle, rgba(255,50,50,0.9) 0%, rgba(255,100,100,0.6) 70%, transparent 100%);
+            border-color: rgba(255,50,50,0.8);
+            box-shadow: 0 0 20px rgba(255,50,50,0.6);
+            animation: pulse 1s infinite alternate;
+        }
+        @keyframes pulse {
+            0% { transform: translateX(-50%) scale(1); }
+            100% { transform: translateX(-50%) scale(1.1); }
+        }
         button {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate3d(-50%,-50%,0);
-        font-size: 2vw;
-        border-radius: 9em;
-        padding: 0.5em 1.5em;
-        border: none;
-        background: rgba(255,255,255,0.8);
-        }        
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 2vw;
+            border-radius: 9em;
+            padding: 0.5em 1.5em;
+            border: none;
+            background: rgba(255,255,255,0.8);
+            cursor: pointer;
+            transition: background 0.3s;
+            z-index: 10;
+        }
+        button:hover {
+            background: rgba(255,255,255,1);
+        }
+        #startButton {
+            top: 50%;
+        }
+        #debugInfo {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: #fff;
+            font-family: monospace;
+            font-size: 11px;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 5px;
+            max-width: 250px;
+            z-index: 10;
+        }
     </style>
 </head>
 <body>
-<!--include the js file-->
-
-<!-- Star button -->
 <p id="logs">logs..</p>
+<div id="debugInfo">Debug Info</div>
 <canvas id="canvas" width="1000" height="400"></canvas>
+<div id="userSpeechIndicator"></div>
 <button id="startButton">Start</button>
 
-
-
-</body>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
-<script src="static/streaming_audio.js"></script>
-</html>
+<script>
+    // Canvas size
+    const WIDTH = 1000;
+    const HEIGHT = 400;
+    const logElement = document.getElementById('logs');
+    const debugElement = document.getElementById('debugInfo');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext("2d");
+    const userSpeechIndicator = document.getElementById('userSpeechIndicator');
 
+    let context;
+    let analyser; // For bot playback
+    let micAnalyser; // For user speech
+    let freqs;
+    let micFreqs;
+    let audioQueue = [];
+    let isPlaying = false;
+    let currentSourceNode = null;
+    let userSpeechLevel = 0;
+    let debugStats = {
+        messagesReceived: 0,
+        audioChunksReceived: 0,
+        audioChunksPlayed: 0,
+        currentlyPlaying: false,
+        queueSize: 0,
+        maxFreq: 0,
+        avgFreq: 0,
+        lastAudioTime: 0
+    };
+
+    // Options for visualization
+    const opts = {
+        smoothing: 0.85,
+        fft: 11, // Even higher for more detail
+        minDecibels: -100,
+        maxDecibels: -10,
+        scale: 1.5, // Increased scale for more visible waves
+        glow: 15,
+        color1: [203, 36, 128],
+        color2: [41, 200, 192],
+        color3: [24, 137, 218],
+        fillOpacity: 0.7,
+        lineWidth: 2,
+        blend: "screen",
+        shift: 50,
+        width: 60,
+        amp: 8 // Much higher amplitude for more dramatic waves
+    };
+
+    function updateDebugInfo() {
+        debugElement.innerHTML = `
+            Messages: ${debugStats.messagesReceived}<br>
+            Audio Chunks Received: ${debugStats.audioChunksReceived}<br>
+            Audio Chunks Played: ${debugStats.audioChunksPlayed}<br>
+            Currently Playing: ${debugStats.currentlyPlaying}<br>
+            Queue Size: ${debugStats.queueSize}<br>
+            Max Freq: ${debugStats.maxFreq}<br>
+            Avg Freq: ${debugStats.avgFreq.toFixed(1)}<br>
+            Last Audio: ${debugStats.lastAudioTime ? new Date(debugStats.lastAudioTime).toLocaleTimeString() : 'Never'}
+        `;
+    }
+
+    document.getElementById('startButton').addEventListener('click', function() {
+        logElement.innerText = 'starting... could take a minute';
+        console.log('[INIT] Starting application...');
+        start();
+        this.style.display = 'none';
+    });
+
+    function start() {
+    const socket = new WebSocket(window.location.href + 'ws');
+    socket.binaryType = 'arraybuffer';  // Ensure binary data is received as ArrayBuffer
+    let audioCtx;
+
+    socket.onopen = () => {
+        console.log("[WEBSOCKET] Connection opened.");
+        logElement.innerText = 'Connection opened';
+        audioCtx = new AudioContext();
+        context = audioCtx;
+        
+        console.log(`[AUDIO_CONTEXT] Created with state: ${audioCtx.state}, sampleRate: ${audioCtx.sampleRate}`);
+            
+        // Create analysers
+        analyser = context.createAnalyser();
+        micAnalyser = context.createAnalyser();
+        
+        // Configure analysers with better settings
+        analyser.fftSize = Math.pow(2, opts.fft);
+        analyser.smoothingTimeConstant = opts.smoothing;
+        analyser.minDecibels = opts.minDecibels;
+        analyser.maxDecibels = opts.maxDecibels;
+        
+        micAnalyser.fftSize = Math.pow(2, opts.fft);
+        micAnalyser.smoothingTimeConstant = opts.smoothing;
+        micAnalyser.minDecibels = opts.minDecibels;
+        micAnalyser.maxDecibels = opts.maxDecibels;
+        
+        console.log(`[ANALYSER] Bot analyser - FFT: ${analyser.fftSize}, Bins: ${analyser.frequencyBinCount}`);
+        console.log(`[ANALYSER] Mic analyser - FFT: ${micAnalyser.fftSize}, Bins: ${micAnalyser.frequencyBinCount}`);
+        
+        freqs = new Uint8Array(analyser.frequencyBinCount);
+        micFreqs = new Uint8Array(micAnalyser.frequencyBinCount);
+
+        navigator.mediaDevices.getUserMedia({ audio: true })
+            .then(stream => {
+                console.log("[MICROPHONE] Access granted.");
+                setupAudioProcessors(stream);
+            })
+            .catch(error => {
+                console.error('[MICROPHONE] Error accessing microphone:', error);
+                logElement.innerText = 'Error accessing microphone: ' + error;
+            });
+        logElement.innerText = 'Mic detected. Listening...';
+    };
+
+    socket.onerror = (error) => {
+        console.error('[WEBSOCKET] Error:', error);
+    };
+
+    socket.onclose = () => {
+        console.log('[WEBSOCKET] Connection closed.');
+    };
+
+    function setupAudioProcessors(stream) {
+        console.log('[AUDIO_SETUP] Setting up audio processors...');
+        const audioSource = audioCtx.createMediaStreamSource(stream);
+        const audioProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+        // Connect microphone to its analyser for visualization
+        audioSource.connect(micAnalyser);
+        // Also connect to processor for WebSocket
+        audioSource.connect(audioProcessor);
+        audioProcessor.connect(audioCtx.destination);
+
+        console.log('[AUDIO_SETUP] Microphone connected to analysers and processor');
+
+        function float32ToInt16(buffer) {
+            let l = buffer.length;
+            const output = new Int16Array(l);
+            while (l--) {
+                let s = Math.max(-1, Math.min(1, buffer[l]));
+                output[l] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            return output;
+        }
+
+        audioProcessor.onaudioprocess = (event) => {
+            const audioData = event.inputBuffer.getChannelData(0);
+            const int16Data = float32ToInt16(audioData);
+            socket.send(int16Data.buffer);
+            
+            // Log mic input level occasionally
+            const rms = Math.sqrt(audioData.reduce((sum, val) => sum + val * val, 0) / audioData.length);
+            if (Math.random() < 0.01) { // 1% chance to log
+                console.log(`[MIC_INPUT] RMS level: ${rms.toFixed(4)}`);
+            }
+        };
+
+        console.log('[AUDIO_SETUP] Starting visualization...');
+        visualize();
+    }
+
+    socket.onmessage = async (event) => {
+        debugStats.messagesReceived++;
+        console.log(`[WEBSOCKET] Message received #${debugStats.messagesReceived}, type: ${typeof event.data}, size: ${event.data.byteLength || event.data.length}`);
+        
+        if (event.data instanceof ArrayBuffer) {
+            const textDecoder = new TextDecoder();
+            let potentialText = '';
+            try {
+                potentialText = textDecoder.decode(event.data);
+            } catch (e) {
+                // Not valid UTF-8, likely binary audio data
+            }
+
+            if (potentialText === 'stop') {
+                console.log('[PLAYBACK] Received stop command');
+                logElement.innerText = 'Interruption';
+                if (currentSourceNode) {
+                    console.log('[PLAYBACK] Stopping current audio node');
+                    currentSourceNode.stop();
+                    currentSourceNode = null;
+                }
+                isPlaying = false;
+                debugStats.currentlyPlaying = false;
+                audioQueue = [];
+                debugStats.queueSize = 0;
+            } else if (potentialText === 'none') {
+                console.log('[WEBSOCKET] Received "none" message');
+                // pass
+            } else {
+                // This is audio data
+                debugStats.audioChunksReceived++;
+                console.log(`[AUDIO_DATA] Received audio chunk #${debugStats.audioChunksReceived} (bytes: ${event.data.byteLength})`);
+                
+                try {
+                    const float32Array = new Float32Array(event.data);
+                    console.log(`[AUDIO_DATA] Decoded Float32Array length: ${float32Array.length}, sample rate assumption: 44100`);
+                    
+                    // Check if audio data has actual content
+                    const maxSample = Math.max(...float32Array);
+                    const minSample = Math.min(...float32Array);
+                    console.log(`[AUDIO_DATA] Audio range: ${minSample.toFixed(4)} to ${maxSample.toFixed(4)}`);
+                    
+                    if (maxSample === 0 && minSample === 0) {
+                        console.warn('[AUDIO_DATA] Warning: Audio data appears to be silent (all zeros)');
+                    }
+                    
+                    const audioBuffer = audioCtx.createBuffer(1, float32Array.length, 44100);
+                    audioBuffer.getChannelData(0).set(float32Array);
+                    audioQueue.push(audioBuffer);
+                    debugStats.queueSize = audioQueue.length;
+                    debugStats.lastAudioTime = Date.now();
+                    
+                    console.log(`[AUDIO_QUEUE] Added to queue. Queue size: ${audioQueue.length}, isPlaying: ${isPlaying}`);
+                    
+                    if (audioQueue.length === 1 && !isPlaying) {
+                        console.log('[AUDIO_QUEUE] Starting playback from queue');
+                        playAudioFromQueue();
+                    }
+                } catch (error) {
+                    console.error('[AUDIO_DATA] Error processing audio data:', error);
+                }
+            }
+        } else {
+            console.warn("[WEBSOCKET] Received non-ArrayBuffer data:", typeof event.data, event.data);
+        }
+        
+        updateDebugInfo();
+    };
+
+    function playAudioFromQueue() {
+        if (audioQueue.length > 0 && !isPlaying) {
+            isPlaying = true;
+            debugStats.currentlyPlaying = true;
+            debugStats.audioChunksPlayed++;
+            
+            const audioBuffer = audioQueue.shift();
+            debugStats.queueSize = audioQueue.length;
+            
+            console.log(`[PLAYBACK] Playing audio chunk #${debugStats.audioChunksPlayed}. Duration: ${audioBuffer.duration.toFixed(2)}s, Queue remaining: ${audioQueue.length}`);
+            logElement.innerText = 'Speaking...';
+            
+            // Resume audio context if suspended
+            if (audioCtx.state === 'suspended') {
+                console.log('[AUDIO_CONTEXT] Resuming suspended audio context');
+                audioCtx.resume();
+            }
+            
+            // Create gain nodes for better control
+            const preGainNode = audioCtx.createGain();
+            const postGainNode = audioCtx.createGain();
+            preGainNode.gain.value = 3.0; // Boost for visualization
+            postGainNode.gain.value = 0.7; // Comfortable listening level
+            
+            console.log(`[PLAYBACK] Gain settings - Pre: ${preGainNode.gain.value}, Post: ${postGainNode.gain.value}`);
+            
+            currentSourceNode = audioCtx.createBufferSource();
+            currentSourceNode.buffer = audioBuffer;
+            
+            // Connect audio chain: source -> preGain -> analyser -> postGain -> destination
+            currentSourceNode.connect(preGainNode);
+            preGainNode.connect(analyser);
+            analyser.connect(postGainNode);
+            postGainNode.connect(audioCtx.destination);
+            
+            console.log('[PLAYBACK] Audio nodes connected. Chain: source -> preGain -> analyser -> postGain -> destination');
+            
+            // Add error handling
+            currentSourceNode.onerror = (error) => {
+                console.error('[PLAYBACK] Audio source error:', error);
+            };
+            
+            console.log('[PLAYBACK] Starting audio playback...');
+            currentSourceNode.start();
+            
+            currentSourceNode.onended = () => {
+                console.log(`[PLAYBACK] Audio chunk finished. Queue size: ${audioQueue.length}`);
+                isPlaying = false;
+                debugStats.currentlyPlaying = false;
+                currentSourceNode = null;
+                logElement.innerText = 'Listening...';
+                
+                // Continue playing if there are more chunks
+                if (audioQueue.length > 0) {
+                    console.log('[PLAYBACK] Continuing with next chunk in queue');
+                    setTimeout(playAudioFromQueue, 10); // Small delay to prevent issues
+                } else {
+                    console.log('[PLAYBACK] Queue empty, playback complete');
+                }
+                updateDebugInfo();
+            };
+        } else {
+            if (audioQueue.length === 0) {
+                console.log('[PLAYBACK] No audio in queue to play');
+            }
+            if (isPlaying) {
+                console.log('[PLAYBACK] Already playing, skipping');
+            }
+        }
+        updateDebugInfo();
+    }
+}
+
+    function visualize() {
+        // Calculate user speech level for the indicator
+        if (micAnalyser && !isPlaying) {
+            micAnalyser.getByteFrequencyData(micFreqs);
+            const sum = micFreqs.reduce((a, b) => a + b, 0);
+            userSpeechLevel = sum / micFreqs.length / 255;
+            
+            // Update user speech indicator
+            if (userSpeechLevel > 0.02) { // Threshold for detecting speech
+                userSpeechIndicator.classList.add('speaking');
+            } else {
+                userSpeechIndicator.classList.remove('speaking');
+            }
+        } else {
+            userSpeechIndicator.classList.remove('speaking');
+        }
+
+        // Clear canvas
+        canvas.width = WIDTH;
+        canvas.height = HEIGHT;
+
+        // Get frequency data and update debug stats
+        if (isPlaying && analyser) {
+            // When bot audio is playing, get real frequency data for animated waves
+            analyser.getByteFrequencyData(freqs);
+            debugStats.maxFreq = Math.max(...freqs);
+            debugStats.avgFreq = freqs.reduce((a, b) => a + b, 0) / freqs.length;
+            
+            // Log occasionally for debugging
+            if (Math.random() < 0.02) { // 2% chance
+                console.log(`[VISUALIZATION] Audio Analysis - Max: ${debugStats.maxFreq}, Avg: ${debugStats.avgFreq.toFixed(1)}, IsPlaying: ${isPlaying}`);
+                console.log(`[VISUALIZATION] Sample frequencies: [${freqs.slice(0, 10).join(', ')}...]`);
+            }
+        } else {
+            // When no bot audio, create flat line by setting all frequencies to minimum
+            freqs.fill(0);
+            debugStats.maxFreq = 0;
+            debugStats.avgFreq = 0;
+        }
+
+        // Always draw the three curves (they'll be flat when no audio)
+        path(0);
+        path(1);
+        path(2);
+
+        updateDebugInfo();
+        requestAnimationFrame(visualize);
+    }
+
+    function range(i) {
+        return Array.from(Array(i).keys());
+    }
+
+    const shuffle = [1, 3, 0, 4, 2];
+
+    function freq(channel, i) {
+        const band = 2 * channel + shuffle[i] * 6;
+        return freqs[band] || 0;
+    }
+
+    function scale(i) {
+        const x = Math.abs(2 - i);
+        const s = 3 - x;
+        return s / 3 * opts.amp;
+    }
+
+    function path(channel) {
+        const color = opts[`color${channel + 1}`].map(Math.floor);
+        ctx.fillStyle = `rgba(${color}, ${opts.fillOpacity})`;
+        ctx.strokeStyle = ctx.shadowColor = `rgb(${color})`;
+        ctx.lineWidth = opts.lineWidth;
+        ctx.shadowBlur = opts.glow;
+        ctx.globalCompositeOperation = opts.blend;
+
+        const m = HEIGHT / 2;
+        const offset = (WIDTH - 15 * opts.width) / 2;
+        const x = range(15).map(
+            i => offset + channel * opts.shift + i * opts.width
+        );
+
+        const y = range(5).map(i =>
+            Math.max(0, m - scale(i) * freq(channel, i) * opts.scale)
+        );
+
+        const h = 2 * m;
+
+        ctx.beginPath();
+        ctx.moveTo(0, m);
+        ctx.lineTo(x[0], m + 1);
+        ctx.bezierCurveTo(x[1], m + 1, x[2], y[0], x[3], y[0]);
+        ctx.bezierCurveTo(x[4], y[0], x[4], y[1], x[5], y[1]);
+        ctx.bezierCurveTo(x[6], y[1], x[6], y[2], x[7], y[2]);
+        ctx.bezierCurveTo(x[8], y[2], x[8], y[3], x[9], y[3]);
+        ctx.bezierCurveTo(x[10], y[3], x[10], y[4], x[11], y[4]);
+        ctx.bezierCurveTo(x[12], y[4], x[12], m, x[13], m);
+        ctx.lineTo(1000, m + 1);
+        ctx.lineTo(x[13], m - 1);
+        ctx.bezierCurveTo(x[12], m, x[12], h - y[4], x[11], h - y[4]);
+        ctx.bezierCurveTo(x[10], h - y[4], x[10], h - y[3], x[9], h - y[3]);
+        ctx.bezierCurveTo(x[8], h - y[3], x[8], h - y[2], x[7], h - y[2]);
+        ctx.bezierCurveTo(x[6], h - y[2], x[6], h - y[1], x[5], h - y[1]);
+        ctx.bezierCurveTo(x[4], h - y[1], x[4], h - y[0], x[3], h - y[0]);
+        ctx.bezierCurveTo(x[2], h - y[0], x[1], m, x[0], m);
+        ctx.lineTo(0, m);
+        ctx.fill();
+        ctx.stroke();
+    }
+
+    // Initialize debug info update
+    setInterval(updateDebugInfo, 100);
+</script>
+</body>
+</html>

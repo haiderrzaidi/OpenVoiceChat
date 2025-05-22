@@ -1,7 +1,8 @@
 import uvicorn
-from openvoicechat.tts.tts_elevenlabs import Mouth_elevenlabs as Mouth
-from openvoicechat.llm.llm_gpt import Chatbot_gpt
-from openvoicechat.stt.stt_hf import Ear_hf as Ear
+from openvoicechat.tts.tts_polly import Mouth_polly
+# from openvoicechat.tts.tts_gtts import Mouth_gtts as Mouth
+from openvoicechat.llm.llm_gpt import Chatbot_gpt as Chatbot
+from openvoicechat.stt.stt_deepgram import Ear_deepgram as Ear
 from openvoicechat.llm.prompts import llama_sales
 from openvoicechat.utils import run_chat
 from dotenv import load_dotenv
@@ -12,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from openvoicechat.utils import Listener_ws, Player_ws
 import torch
+import os
 import logging
 
 # Configure basic logging
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -35,15 +37,29 @@ async def websocket_endpoint(websocket: WebSocket):
     listener = Listener_ws(input_queue)
     player = Player_ws(output_queue)
 
-    mouth = Mouth(player=player, voice_id='IKne3meq5aSn9XLyUdCD')
-    ear = Ear(device=device, silence_seconds=2,
-              listener=listener)
+    api_key = os.getenv("DEEPGRAM_API_KEY")
+    ear = Ear(silence_seconds=1.0, api_key=api_key)
+    # ear = Ear_hf(
+    #     model_id="openai/whisper-tiny.en",
+    #     silence_seconds=1.5,
+    #     device=device,
+
+    # )
     load_dotenv()
 
-    chatbot = Chatbot_gpt(sys_prompt=llama_sales)
+    chatbot = Chatbot(sys_prompt=llama_sales, api_key=os.getenv("TOGETHERAI_API_KEY"))
+
+    mouth = Mouth_polly(
+        voice_id='Matthew', 
+        engine='standard',
+        output_format='mp3',
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region_name=os.getenv("REGION_NAME")
+    )
     # Update the call to run_chat to include enable_interruptions=True
     # Assuming the order in run_chat is: verbose, enable_interruptions
-    threading.Thread(target=run_chat, args=(mouth, ear, chatbot, True, True)).start()
+    threading.Thread(target=run_chat, args=(mouth, ear, chatbot, True, False)).start()
 
     try:
         while True:
@@ -73,9 +89,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.get("/")
 def read_root():
-    return FileResponse('static/stream_audio.html')
+    return FileResponse('web/static/stream_audio.html')
 
 
 if __name__ == "__main__":
     uvicorn.run(app, host='0.0.0.0', port=8000,
-                ssl_keyfile="localhost+2-key.pem", ssl_certfile="localhost+2.pem")
+                ssl_keyfile="web/localhost+2-key.pem", ssl_certfile="web/localhost+2.pem")
