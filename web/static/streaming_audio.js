@@ -23,6 +23,7 @@ function start() {
   let audioCtx;
 
   socket.onopen = () => {
+    console.log("WebSocket connection opened.");
     logElement.innerText = 'Connection opened';
     audioCtx = new AudioContext();
     context = audioCtx;
@@ -30,8 +31,14 @@ function start() {
     freqs = new Uint8Array(analyser.frequencyBinCount);
 
     navigator.mediaDevices.getUserMedia({ audio: true })
-      .then(stream => setupAudioProcessors(stream))
-      .catch(error => console.error('Error accessing microphone:', error));
+      .then(stream => {
+        console.log("Microphone access granted.");
+        setupAudioProcessors(stream);
+      })
+      .catch(error => {
+        console.error('Error accessing microphone:', error);
+        logElement.innerText = 'Error accessing microphone: ' + error;
+      });
     logElement.innerText = 'Mic detected. Listening...';
   };
 
@@ -40,17 +47,28 @@ function start() {
   };
 
   socket.onclose = () => {
-    console.log('WebSocket connection closed');
+    console.log('WebSocket connection closed.');
   };
 
   function setupAudioProcessors(stream) {
     const audioSource = audioCtx.createMediaStreamSource(stream);
     const audioProcessor = audioCtx.createScriptProcessor(16384, 1, 1);
 
+    function float32ToInt16(buffer) {
+      let l = buffer.length;
+      const output = new Int16Array(l);
+      while (l--) {
+        let s = Math.max(-1, Math.min(1, buffer[l]));
+        output[l] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      return output;
+    }
+
     audioProcessor.onaudioprocess = (event) => {
       const audioData = event.inputBuffer.getChannelData(0);
-      const buffer = new Float32Array(audioData);
-      socket.send(buffer);
+      const int16Data = float32ToInt16(audioData);
+      console.log("Sending Int16Array audio data, byteLength:", int16Data.byteLength);
+      socket.send(int16Data.buffer);
     };
 
     audioSource.connect(audioProcessor);
@@ -60,39 +78,56 @@ function start() {
   }
 
   socket.onmessage = async (event) => {
-    const receivedData = new TextDecoder().decode(await event.data.arrayBuffer());
-    if (receivedData === 'stop') {
-      logElement.innerText = 'Interruption';
-      if (currentSourceNode) {
-        currentSourceNode.stop();
-        currentSourceNode = null;
-      }
-      isPlaying = false;
-      audioQueue = [];
-    } else if (receivedData === 'none') {
-//        pass
+    // Try to decode as text first for control messages
+    if (event.data instanceof ArrayBuffer) {
+        const textDecoder = new TextDecoder();
+        let potentialText = '';
+        try {
+            potentialText = textDecoder.decode(event.data);
+        } catch (e) {
+            // Not valid UTF-8, likely binary audio data
+        }
+
+        if (potentialText === 'stop') {
+            logElement.innerText = 'Interruption';
+            if (currentSourceNode) {
+                currentSourceNode.stop();
+                currentSourceNode = null;
+            }
+            isPlaying = false;
+            audioQueue = [];
+        } else if (potentialText === 'none') {
+            // pass
+        } else {
+            // Assuming it's audio data if not 'stop' or 'none'
+            console.log("Received audio data from server (bytes):", event.data.byteLength);
+            const float32Array = new Float32Array(event.data); // event.data is already ArrayBuffer
+            console.log("Decoded Float32Array length:", float32Array.length);
+            const audioBuffer = audioCtx.createBuffer(1, float32Array.length, 44100);
+            audioBuffer.getChannelData(0).set(float32Array);
+            audioQueue.push(audioBuffer);
+            if (audioQueue.length === 1 && !isPlaying) {
+                playAudioFromQueue();
+            }
+        }
     } else {
-      const float32Array = new Float32Array(await event.data.arrayBuffer());
-      const audioBuffer = audioCtx.createBuffer(1, float32Array.length, 44100);
-      audioBuffer.getChannelData(0).set(float32Array);
-      audioQueue.push(audioBuffer);
-      if (audioQueue.length === 1 && !isPlaying) {
-        playAudioFromQueue();
-      }
+        console.warn("Received non-ArrayBuffer data:", event.data);
     }
   };
 
   function playAudioFromQueue() {
     if (audioQueue.length > 0 && !isPlaying) {
       isPlaying = true;
-      logElement.innerText = 'Speaking...';
       const audioBuffer = audioQueue.shift();
+      console.log("Playing audio from queue. Buffer length:", audioBuffer.length);
+      logElement.innerText = 'Speaking...';
       currentSourceNode = audioCtx.createBufferSource();
       currentSourceNode.buffer = audioBuffer;
       currentSourceNode.connect(analyser);
       currentSourceNode.connect(audioCtx.destination);
       currentSourceNode.start();
       currentSourceNode.onended = () => {
+        console.log("Audio playback finished. Queue size:", audioQueue.length);
         isPlaying = false;
         logElement.innerText = 'Listening...';
         playAudioFromQueue();
