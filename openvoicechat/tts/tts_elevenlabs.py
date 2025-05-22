@@ -9,7 +9,8 @@ import numpy as np
 import sounddevice as sd
 import requests
 import os
-
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
 class Mouth_elevenlabs(BaseMouth):
     def __init__(self, model_id='eleven_turbo_v2',
@@ -18,7 +19,7 @@ class Mouth_elevenlabs(BaseMouth):
         self.model_id = model_id
         self.voice_id = voice_id
         load_dotenv()
-        self.api_key = os.getenv('ELEVENLABS_API_KEY')
+        self.api_key = os.getenv("ELEVENLABS_API_KEY")
         super().__init__(sample_rate=44100, player=player)
 
     def run_tts(self, text):
