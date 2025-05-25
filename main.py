@@ -36,4 +36,4 @@ if __name__ == "__main__":
         region_name=os.getenv("REGION_NAME")
     )
 
-    run_chat(mouth, ear, chatbot, verbose=True, stopping_criteria=lambda x: '[END]' in x)
+    run_chat(mouth, ear, chatbot, verbose=True, enable_interruptions=False,stopping_criteria=lambda x: '[END]' in x)

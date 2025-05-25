@@ -52,7 +52,7 @@ async def websocket_endpoint(websocket: WebSocket):
     mouth = Mouth_polly(
         voice_id='Matthew', 
         engine='standard',
-        output_format='mp3',
+        output_format='pcm',
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         region_name=os.getenv("REGION_NAME"),
@@ -90,7 +90,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.get("/")
 def read_root():
-    return FileResponse('web/static/stream_audio.html')
+    return FileResponse('web/static/simple_audio.html')
 
 
 if __name__ == "__main__":

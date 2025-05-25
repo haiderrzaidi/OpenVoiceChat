@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Simple Audio Client</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin-top: 20px; }
+        #startButton { font-size: 1.2em; padding: 10px 20px; }
+        #statusDisplay { margin-top: 20px; font-size: 1.1em; color: #333; }
+        .log-area {
+            width: 90%;
+            height: 200px;
+            border: 1px solid #ccc;
+            margin-top: 20px;
+            padding: 10px;
+            overflow-y: scroll;
+            font-family: monospace;
+            font-size: 0.9em;
+            background-color: #f9f9f9;
+        }
+    </style>
+</head>
+<body>
+    <h1>Simple Audio Test Client</h1>
+    <button id="startButton">Start</button>
+    <div id="statusDisplay">Press Start to connect</div>
+    <div id="consoleLog" class="log-area">Client Logs Will Appear Here...</div>
+
+    <script>
+        const startButton = document.getElementById('startButton');
+        const statusDisplay = document.getElementById('statusDisplay');
+        const consoleLogDiv = document.getElementById('consoleLog');
+
+        let socket;
+        let audioCtx;
+        let scriptProcessor;
+        let micSource;
+        
+        let audioQueue = [];
+        let isPlaying = false;
+        let micCooldownActive = false;
+        let audioContextStarted = false; // To handle AudioContext resume
+
+        const TARGET_SAMPLE_RATE = 16000;
+
+        function logToScreen(message) {
+            console.log(message); // Also log to actual console
+            const logEntry = document.createElement('div');
+            logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            consoleLogDiv.appendChild(logEntry);
+            consoleLogDiv.scrollTop = consoleLogDiv.scrollHeight;
+        }
+
+        startButton.onclick = () => {
+            if (!audioContextStarted) {
+                // Attempt to resume/start AudioContext on user gesture
+                if (audioCtx && audioCtx.state === 'suspended') {
+                    audioCtx.resume().then(() => {
+                        logToScreen('AudioContext resumed successfully.');
+                        audioContextStarted = true;
+                        initWebSocketAndMic();
+                    }).catch(e => logToScreen(`Error resuming AudioContext: ${e}`));
+                } else {
+                     // If audioCtx doesn't exist or is not suspended, just proceed
+                    audioContextStarted = true;
+                    initWebSocketAndMic();
+                }
+            } else {
+                initWebSocketAndMic(); // If already started, re-init WebSocket/Mic if needed (e.g. after stop)
+            }
+            startButton.disabled = true;
+            statusDisplay.textContent = 'Connecting...';
+        };
+
+        function initWebSocketAndMic() {
+            if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+                logToScreen('WebSocket already open or opening.');
+                return;
+            }
+
+            socket = new WebSocket(window.location.protocol.replace('http', 'ws') + '//' + window.location.host + '/ws');
+            socket.binaryType = 'arraybuffer';
+
+            socket.onopen = () => {
+                logToScreen('WebSocket connection opened.');
+                statusDisplay.textContent = 'Connected. Initializing Mic...';
+                if (!audioCtx) { // Initialize AudioContext only once or if closed
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
+                    logToScreen(`AudioContext created. State: ${audioCtx.state}, Target SR: ${audioCtx.sampleRate}`);
+                } else if (audioCtx.state === 'closed') {
+                     audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
+                     logToScreen(`AudioContext re-created. State: ${audioCtx.state}, Target SR: ${audioCtx.sampleRate}`);
+                }
+
+
+                if (audioCtx.state === 'suspended') {
+                    logToScreen('AudioContext is suspended. Waiting for user gesture (already handled by Start button).');
+                    // No further action here, startButton click should have resumed it
+                }
+                setupMicrophone();
+            };
+
+            socket.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    if (event.data.byteLength === 0) { // Or some other minimal size if "none" has actual content
+                        logToScreen('Received empty/marker ArrayBuffer (likely "none").');
+                        return; // Ignore if it's an empty "none" message
+                    }
+                    try {
+                        const textDecoder = new TextDecoder('utf-8', { fatal: true });
+                        const potentialText = textDecoder.decode(event.data);
+                        if (potentialText === 'stop') {
+                            logToScreen('Received "stop" command from server.');
+                            if (currentSourceNode) {
+                                currentSourceNode.onended = null; // Prevent onended logic from firing after manual stop
+                                currentSourceNode.stop();
+                                currentSourceNode = null;
+                            }
+                            audioQueue = [];
+                            isPlaying = false;
+                            micCooldownActive = false; // Reset cooldown on stop
+                            statusDisplay.textContent = 'Mic active (stopped by server)';
+                            return;
+                        }
+                         // If decode succeeds and it's not 'stop', it might be an unexpected text message.
+                         // For this simple client, we'll assume other text messages are not primary data.
+                         logToScreen(`Received unexpected text: ${potentialText}`);
+
+                    } catch (e) {
+                        // This means it's binary data, not decodable as UTF-8 text
+                        logToScreen(`Audio data received. Current queue: ${audioQueue.length}, isPlaying: ${isPlaying}`);
+                        const float32Array = new Float32Array(event.data);
+                        logToScreen(`Decoded Float32Array. Length: ${float32Array.length}, SR assumption: ${TARGET_SAMPLE_RATE}`);
+
+                        if (float32Array.length === 0) {
+                            logToScreen("Received audio data is empty after Float32 conversion. Skipping.");
+                            return;
+                        }
+                        
+                        const audioBuffer = audioCtx.createBuffer(1, float32Array.length, TARGET_SAMPLE_RATE);
+                        audioBuffer.getChannelData(0).set(float32Array);
+                        
+                        audioQueue.push(audioBuffer);
+                        logToScreen(`Audio pushed to queue. New queue: ${audioQueue.length}`);
+                        
+                        if (!isPlaying) {
+                            playAudioFromQueue();
+                        }
+                    }
+                } else {
+                    logToScreen(`Received non-ArrayBuffer message: ${event.data}`);
+                     if (event.data === 'none') { // Explicitly check for 'none' string if server might send it this way
+                        logToScreen('Received "none" string message.');
+                    }
+                }
+            };
+
+            socket.onerror = (error) => {
+                logToScreen(`WebSocket Error: ${JSON.stringify(error, Object.getOwnPropertyNames(error))}`);
+                statusDisplay.textContent = 'WebSocket Error. Try Restarting.';
+                startButton.disabled = false;
+            };
+
+            socket.onclose = (event) => {
+                logToScreen(`WebSocket connection closed. Code: ${event.code}, Reason: "${event.reason}", Clean: ${event.wasClean}`);
+                statusDisplay.textContent = 'Disconnected. Press Start to reconnect.';
+                startButton.disabled = false;
+                if (scriptProcessor) {
+                    scriptProcessor.disconnect();
+                }
+                if (micSource) {
+                    micSource.disconnect();
+                }
+                // Optionally, try to close audioCtx if no longer needed and re-create on next start
+                // if(audioCtx && audioCtx.state !== 'closed') audioCtx.close();
+                // audioCtx = null;
+            };
+        }
+
+        function setupMicrophone() {
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    if (!audioCtx || audioCtx.state === 'closed') { // Ensure AudioContext is active
+                        logToScreen("AudioContext not available for microphone setup. Aborting.");
+                        statusDisplay.textContent = 'Error: AudioContext closed.';
+                        return;
+                    }
+                    micSource = audioCtx.createMediaStreamSource(stream);
+                    // Buffer size might need tuning. Larger buffers reduce CPU but increase latency.
+                    const bufferSize = 4096; 
+                    scriptProcessor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+
+                    scriptProcessor.onaudioprocess = (event) => {
+                        if (isPlaying || micCooldownActive) {
+                            if (micCooldownActive && Math.random() < 0.1) { // Log occasionally during cooldown
+                                logToScreen('Mic data NOT sent due to cooldown.');
+                            }
+                            return; // Don't send mic data if bot is playing or in cooldown
+                        }
+
+                        const inputData = event.inputBuffer.getChannelData(0);
+                        const int16Data = float32ToInt16(inputData);
+                        if (socket && socket.readyState === WebSocket.OPEN) {
+                            socket.send(int16Data.buffer);
+                        }
+                    };
+
+                    micSource.connect(scriptProcessor);
+                    scriptProcessor.connect(audioCtx.destination); // Needed for ScriptProcessor to run
+                    statusDisplay.textContent = 'Mic active. Listening...';
+                    logToScreen('Microphone setup complete and connected.');
+                })
+                .catch(error => {
+                    logToScreen(`Error accessing microphone: ${error}`);
+                    statusDisplay.textContent = 'Mic Error. Check Permissions.';
+                    startButton.disabled = false;
+                });
+        }
+        
+        function float32ToInt16(buffer) {
+            let l = buffer.length;
+            const output = new Int16Array(l);
+            while (l--) {
+                output[l] = Math.min(1, Math.max(-1, buffer[l])) * 0x7FFF;
+            }
+            return output;
+        }
+
+        let currentSourceNode = null;
+
+        function playAudioFromQueue() {
+            logToScreen(`playAudioFromQueue called. Queue: ${audioQueue.length}, isPlaying: ${isPlaying}`);
+            if (audioQueue.length > 0 && !isPlaying) {
+                isPlaying = true;
+                const audioBufferToPlay = audioQueue.shift();
+                logToScreen(`Playing chunk. Duration: ${audioBufferToPlay.duration.toFixed(3)}s. Queue remaining: ${audioQueue.length}`);
+                statusDisplay.textContent = 'Bot Speaking...';
+
+                currentSourceNode = audioCtx.createBufferSource();
+                currentSourceNode.buffer = audioBufferToPlay;
+                currentSourceNode.connect(audioCtx.destination);
+                
+                currentSourceNode.onended = () => {
+                    logToScreen(`Chunk finished. audioCtx.currentTime: ${audioCtx.currentTime.toFixed(3)}s`);
+                    isPlaying = false;
+                    currentSourceNode = null; // Clean up
+                    
+                    if (audioQueue.length > 0) {
+                        logToScreen('Queue has more items. Scheduling next playback.');
+                        setTimeout(playAudioFromQueue, 10); // Play next chunk after a small delay
+                    } else {
+                        logToScreen('Queue empty. Playback complete. Starting mic cooldown.');
+                        statusDisplay.textContent = 'Mic active (cooldown)';
+                        micCooldownActive = true;
+                        setTimeout(() => {
+                            micCooldownActive = false;
+                            statusDisplay.textContent = 'Mic active. Listening...';
+                            logToScreen('Mic cooldown finished.');
+                        }, 500); // 500ms cooldown
+                    }
+                };
+                currentSourceNode.start();
+            } else if (audioQueue.length === 0) {
+                logToScreen('playAudioFromQueue: Queue empty, nothing to play.');
+                statusDisplay.textContent = 'Mic active. Listening...'; // Should already be if not in cooldown
+            } else if (isPlaying) {
+                logToScreen('playAudioFromQueue: Already playing. Will play next from onended.');
+            }
+        }
+    </script>
+</body>
+</html>

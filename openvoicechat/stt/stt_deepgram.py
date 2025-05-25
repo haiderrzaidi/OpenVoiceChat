@@ -33,7 +33,7 @@ class Ear_deepgram(BaseEar):
         async def f():
             try:
                 async with websockets.connect(
-                    "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000&channels=1&model=nova-2",
+                    "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000&channels=1&model=nova-2&endpointing=1500",
                     additional_headers=extra_headers,
                 ) as ws:
 

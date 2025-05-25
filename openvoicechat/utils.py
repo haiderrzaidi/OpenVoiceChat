@@ -82,19 +82,50 @@ class Player_ws:
         logger.info("Player_ws initialized.")
 
     def play(self, audio_array, samplerate):
-        logger.info(f"Player_ws: Play called. Input audio array type: {type(audio_array)}, dtype: {audio_array.dtype}, shape: {audio_array.shape}, samplerate: {samplerate}")
+        logger.info(f"Player_ws: Play method called. Input audio array type: {type(audio_array)}, dtype: {audio_array.dtype}, shape: {audio_array.shape}, samplerate: {samplerate}")
+        
+        # Ensure audio_array is float32 and normalized
         if audio_array.dtype == np.int16:
-            audio_array = audio_array.astype(np.float32) / 32768.0
+            # Correct normalization for int16 to float32 range [-1.0, 1.0)
+            audio_array = audio_array.astype(np.float32) / 32768.0 
         elif audio_array.dtype != np.float32:
+            logger.warning(f"Player_ws: Unexpected audio_array.dtype: {audio_array.dtype}. Attempting astype(np.float32). Normalization might be incorrect if original range is not standard for this type.")
             audio_array = audio_array.astype(np.float32)
-        # Normalize to [-1, 1]
-        max_val = np.max(np.abs(audio_array))
-        if max_val > 0:
-            audio_array = audio_array / max_val
-        resampled_audio = librosa.resample(y=audio_array, orig_sr=samplerate, target_sr=44100)
-        logger.info(f"Player_ws: Resampled to 44100 Hz float32. Shape: {resampled_audio.shape}")
-        audio_bytes = resampled_audio.tobytes()
-        logger.info(f"Player_ws: Putting bytes to output queue. Length: {len(audio_bytes)}")
+        
+        target_sr_frontend = 16000  # Explicitly setting target for frontend
+
+        if samplerate == target_sr_frontend:
+            processed_audio = audio_array
+            logger.info(f"Player_ws: Input samplerate ({samplerate} Hz) matches target frontend samplerate ({target_sr_frontend} Hz). No resampling needed.")
+        else:
+            logger.info(f"Player_ws: Input samplerate ({samplerate} Hz) differs from target frontend samplerate ({target_sr_frontend} Hz). Resampling audio from {samplerate} Hz to {target_sr_frontend} Hz...")
+            try:
+                processed_audio = librosa.resample(y=audio_array, orig_sr=samplerate, target_sr=target_sr_frontend)
+                logger.info(f"Player_ws: Resampled to {target_sr_frontend} Hz float32. New shape: {processed_audio.shape}")
+            except Exception as e:
+                logger.error(f"Player_ws: Error during resampling: {e}. Sending audio with original samplerate {samplerate} Hz instead.", exc_info=True)
+                processed_audio = audio_array # Fallback to original audio if resampling fails
+                # IMPORTANT: If resampling fails, the Target SR log below will be misleading.
+                # Consider how to handle this case better if it occurs.
+                # For now, we proceed, but the audio will likely be fast/slow on client.
+        
+        # Ensure processed_audio is C-contiguous for tobytes() if librosa output isn't guaranteed to be,
+        # or if the no-resampling path resulted in a non-contiguous view (less likely for direct assignment).
+        if not processed_audio.flags['C_CONTIGUOUS']:
+            logger.info("Player_ws: Processed audio is not C-contiguous. Making a contiguous copy.")
+            processed_audio = np.ascontiguousarray(processed_audio)
+
+        audio_bytes = processed_audio.tobytes()
+        
+        # Determine the actual sample rate of the data being sent
+        # This is crucial for accurate logging, especially if resampling failed.
+        final_samplerate_being_sent = target_sr_frontend
+        # A more robust check would be to see if processed_audio is the same as audio_array AND samplerate != target_sr_frontend
+        if processed_audio is audio_array and samplerate != target_sr_frontend: # Heuristic: if it's the original and SR mismatch, resampling failed
+                final_samplerate_being_sent = samplerate
+
+
+        logger.info(f"Player_ws: Putting audio to output queue. Actual Sample Rate of Data: {final_samplerate_being_sent} Hz, Data type: {processed_audio.dtype}, Shape: {processed_audio.shape}, Bytes length: {len(audio_bytes)}")
         self.output_queue.put(audio_bytes)
 
     def stop(self):
@@ -104,15 +135,8 @@ class Player_ws:
         self.output_queue.put('stop'.encode())
 
     def wait(self):
-        time_to_wait = 0
-        # while not self.output_queue.empty():
-        #     time.sleep(0.1)
-        #     peek at the first element
-        # time_to_wait = len(self.output_queue.queue[0]) / (44100 * 4)
-        # print(time_to_wait)
-        # time.sleep(time_to_wait)
-        self.playing = False
-        
+        logger.info("Player_ws: wait() called, doing nothing for WebSocket player.")
+        pass
 
 
 class Listener_ws:
